@@ -1,0 +1,10 @@
+[package]
+name = "addeol"
+version = "0.1.0"
+edition = "2021"
+
+description = "Ensure files end with an end-of-line"
+
+[dependencies]
+clap = { version = "3.2.16", features = ["derive"] }
+ignore = "0.4.18"
