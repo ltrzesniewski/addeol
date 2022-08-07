@@ -4,12 +4,14 @@ use ignore::WalkState::Continue;
 use ignore::{DirEntry, WalkBuilder, WalkParallel};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::{env, process, slice};
+use std::sync::mpsc;
+use std::sync::mpsc::Receiver;
+use std::{env, process, slice, thread};
 
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+type ErrorBox = Box<dyn std::error::Error + Send + Sync>;
+type Result<T> = std::result::Result<T, ErrorBox>;
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[clap(author, version, about)]
 struct Args {
     /// Glob to match
@@ -37,6 +39,13 @@ struct Args {
     list: bool,
 }
 
+enum FileResult {
+    UpdatedFile(DirEntry),
+    UpToDateFile(DirEntry),
+    FileError(DirEntry, ErrorBox),
+    UnknownError(ErrorBox),
+}
+
 fn main() {
     let args: Args = Args::parse();
 
@@ -52,8 +61,6 @@ fn main() {
         println!("DRY RUN");
     }
 
-    println!();
-
     if let Err(msg) = run(&args) {
         eprintln!("{}", msg);
         process::exit(1);
@@ -63,33 +70,31 @@ fn main() {
 fn run(args: &Args) -> Result<()> {
     let walker = build_walker(&args)?;
 
-    let file_count = AtomicUsize::new(0);
-    let updated_count = AtomicUsize::new(0);
+    let (tx, rx) = mpsc::channel::<FileResult>();
+    let args2 = args.clone();
+
+    let printer = thread::spawn(move || {
+        print_results(rx, &args2);
+    });
 
     walker.run(|| {
-        Box::new(|entry| {
+        let tx = tx.clone();
+
+        Box::new(move |entry| {
             match entry {
                 Ok(entry) => {
                     if entry.file_type().map_or(false, |ft| ft.is_file()) {
-                        file_count.fetch_add(1, Ordering::Relaxed);
+                        let result = match process(&entry, args.dry_run) {
+                            Ok(true) => FileResult::UpdatedFile(entry),
+                            Ok(false) => FileResult::UpToDateFile(entry),
+                            Err(err) => FileResult::FileError(entry, err),
+                        };
 
-                        match process(&entry, args.dry_run) {
-                            Ok(updated) => {
-                                if updated {
-                                    updated_count.fetch_add(1, Ordering::Relaxed);
-                                    println!("updated: {}", entry.path().display());
-                                } else if args.list {
-                                    println!("   read: {}", entry.path().display());
-                                }
-                            }
-                            Err(msg) => {
-                                eprintln!("  error: {}: {}", entry.path().display(), msg);
-                            }
-                        }
+                        tx.send(result).unwrap();
                     }
                 }
                 Err(msg) => {
-                    eprintln!("  error: {}", msg);
+                    tx.send(FileResult::UnknownError(msg.into())).unwrap();
                 }
             }
 
@@ -97,17 +102,8 @@ fn run(args: &Args) -> Result<()> {
         })
     });
 
-    println!();
-    println!("total files: {}", file_count.load(Ordering::Relaxed));
-    println!(
-        "{}: {}",
-        if args.dry_run {
-            "files to be updated"
-        } else {
-            "updated files"
-        },
-        updated_count.load(Ordering::Relaxed),
-    );
+    drop(tx);
+    printer.join().unwrap();
 
     Ok(())
 }
@@ -176,4 +172,56 @@ fn process(entry: &DirEntry, dry_run: bool) -> Result<bool> {
     file.flush()?;
 
     Ok(true)
+}
+
+fn print_results(rx: Receiver<FileResult>, args: &Args) {
+    println!();
+
+    let mut file_count = 0;
+    let mut updated_count = 0;
+    let mut error_count = 0;
+
+    while let Ok(result) = rx.recv() {
+        match result {
+            FileResult::UpdatedFile(entry) => {
+                file_count += 1;
+                updated_count += 1;
+                println!("updated: {}", entry.path().display());
+            }
+            FileResult::UpToDateFile(entry) => {
+                file_count += 1;
+                if args.list {
+                    println!("   read: {}", entry.path().display());
+                }
+            }
+            FileResult::FileError(entry, err) => {
+                file_count += 1;
+                error_count += 1;
+                eprintln!("  error: {}: {}", entry.path().display(), err);
+            }
+            FileResult::UnknownError(err) => {
+                error_count += 1;
+                eprintln!("  error: {}", err);
+            }
+        };
+    }
+
+    if file_count != 0 {
+        println!();
+    }
+
+    println!("total files: {}", file_count);
+    println!(
+        "{}: {}",
+        if args.dry_run {
+            "files to be updated"
+        } else {
+            "updated files"
+        },
+        updated_count
+    );
+
+    if error_count != 0 {
+        println!("error count: {}", error_count);
+    }
 }
