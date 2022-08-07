@@ -1,9 +1,10 @@
 use clap::Parser;
-use ignore::overrides::{Override, OverrideBuilder};
+use ignore::overrides::OverrideBuilder;
 use ignore::WalkState::Continue;
 use ignore::{DirEntry, WalkBuilder, WalkParallel};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{env, process, slice};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -22,6 +23,18 @@ struct Args {
     /// Do not modify files
     #[clap(short = 'n', long)]
     dry_run: bool,
+
+    /// Don't read ignore files
+    #[clap(long)]
+    no_ignore: bool,
+
+    /// Include hidden files
+    #[clap(long)]
+    hidden: bool,
+
+    /// List all included files
+    #[clap(long)]
+    list: bool,
 }
 
 fn main() {
@@ -39,6 +52,8 @@ fn main() {
         println!("DRY RUN");
     }
 
+    println!();
+
     if let Err(msg) = run(&args) {
         eprintln!("{}", msg);
         process::exit(1);
@@ -48,31 +63,51 @@ fn main() {
 fn run(args: &Args) -> Result<()> {
     let walker = build_walker(&args)?;
 
+    let file_count = AtomicUsize::new(0);
+    let updated_count = AtomicUsize::new(0);
+
     walker.run(|| {
-        Box::new(move |entry| {
+        Box::new(|entry| {
             match entry {
                 Ok(entry) => {
                     if entry.file_type().map_or(false, |ft| ft.is_file()) {
+                        file_count.fetch_add(1, Ordering::Relaxed);
+
                         match process(&entry, args.dry_run) {
                             Ok(updated) => {
                                 if updated {
-                                    println!("file: {}", entry.path().display());
+                                    updated_count.fetch_add(1, Ordering::Relaxed);
+                                    println!("updated: {}", entry.path().display());
+                                } else if args.list {
+                                    println!("   read: {}", entry.path().display());
                                 }
                             }
                             Err(msg) => {
-                                eprintln!("error: {}: {}", entry.path().display(), msg);
+                                eprintln!("  error: {}: {}", entry.path().display(), msg);
                             }
                         }
                     }
                 }
                 Err(msg) => {
-                    eprintln!("error: {}", msg);
+                    eprintln!("  error: {}", msg);
                 }
             }
 
             Continue
         })
     });
+
+    println!();
+    println!("total files: {}", file_count.load(Ordering::Relaxed));
+    println!(
+        "{}: {}",
+        if args.dry_run {
+            "files to be updated"
+        } else {
+            "updated files"
+        },
+        updated_count.load(Ordering::Relaxed),
+    );
 
     Ok(())
 }
@@ -83,17 +118,29 @@ fn build_walker(args: &Args) -> Result<WalkParallel> {
         builder.add(path);
     }
 
-    let o = if args.glob.is_empty() {
-        Override::empty()
-    } else {
-        let mut builder = OverrideBuilder::new(env::current_dir()?);
-        for glob in &args.glob {
-            builder.add(&glob)?;
-        }
-        builder.build()?
-    };
+    if !args.glob.is_empty() {
+        let mut override_builder = OverrideBuilder::new(env::current_dir()?);
 
-    Ok(builder.overrides(o).build_parallel())
+        for glob in &args.glob {
+            override_builder.add(&glob)?;
+        }
+
+        builder.overrides(override_builder.build()?);
+    }
+
+    if args.no_ignore {
+        builder
+            .ignore(false)
+            .git_ignore(false)
+            .git_global(false)
+            .parents(false);
+    }
+
+    if args.hidden {
+        builder.hidden(false);
+    }
+
+    Ok(builder.build_parallel())
 }
 
 fn process(entry: &DirEntry, dry_run: bool) -> Result<bool> {
