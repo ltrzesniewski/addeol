@@ -145,13 +145,15 @@ fn process(entry: &DirEntry, dry_run: bool) -> Result<bool> {
         .write(!dry_run)
         .open(entry.path())?;
 
-    if file.seek(SeekFrom::End(0))? == 0 {
-        return Ok(false);
+    if let Err(err) = file.seek(SeekFrom::End(-1)) {
+        return if file.seek(SeekFrom::End(0))? == 0 {
+            Ok(false) // Empty file
+        } else {
+            Err(err.into())
+        };
     }
 
     let mut byte = 0u8;
-
-    file.seek(SeekFrom::End(-1))?;
     file.read_exact(slice::from_mut(&mut byte))?;
 
     if byte == b'\n' {
@@ -167,7 +169,6 @@ fn process(entry: &DirEntry, dry_run: bool) -> Result<bool> {
     #[cfg(not(windows))]
     const NEWLINE: &[u8] = b"\n";
 
-    file.seek(SeekFrom::End(0))?;
     file.write_all(NEWLINE)?;
     file.flush()?;
 
