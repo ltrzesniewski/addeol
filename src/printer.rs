@@ -27,11 +27,11 @@ impl Printer {
             }
             FileResult::UpToDateFile(ref entry) => {
                 self.write_header("up to date", Color::White)?;
-                self.write_file_path(&entry)?;
+                self.write_file_path(entry)?;
             }
             FileResult::FileError(ref entry, ref err) => {
                 self.write_header("error", Color::Red)?;
-                self.write_file_path(&entry)?;
+                self.write_file_path(entry)?;
 
                 self.stdout
                     .set_color(ColorSpec::new().set_fg(Some(Color::Red)))?;
@@ -74,7 +74,7 @@ impl Printer {
             .set_color(ColorSpec::new().set_fg(Some(Color::Yellow)))?;
         write!(&mut self.stdout, "{:>20}", label)?;
         self.stdout.set_color(&ColorSpec::new())?;
-        write!(&mut self.stdout, ": {}\n", stat)?;
+        writeln!(&mut self.stdout, ": {}", stat)?;
         Ok(())
     }
 }

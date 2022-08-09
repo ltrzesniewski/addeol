@@ -59,7 +59,7 @@ fn main() {
 }
 
 fn run(args: &Args) -> Result<()> {
-    let walker = build_walker(&args)?;
+    let walker = build_walker(args)?;
 
     let (tx, rx) = mpsc::channel::<FileResult>();
     let args2 = args.clone();
@@ -109,7 +109,7 @@ fn build_walker(args: &Args) -> Result<WalkParallel> {
         let mut override_builder = OverrideBuilder::new(env::current_dir()?);
 
         for glob in &args.glob {
-            override_builder.add(&glob)?;
+            override_builder.add(glob)?;
         }
 
         builder.overrides(override_builder.build()?);
