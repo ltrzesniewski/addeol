@@ -1,3 +1,4 @@
+use crate::printer::Printer;
 use clap::Parser;
 use ignore::overrides::OverrideBuilder;
 use ignore::WalkState::Continue;
@@ -7,6 +8,8 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::mpsc;
 use std::sync::mpsc::Receiver;
 use std::{env, process, slice, thread};
+
+mod printer;
 
 type ErrorBox = Box<dyn std::error::Error + Send + Sync>;
 type Result<T> = std::result::Result<T, ErrorBox>;
@@ -49,18 +52,6 @@ enum FileResult {
 fn main() {
     let args: Args = Args::parse();
 
-    for glob in &args.glob {
-        println!("glob: {}", glob);
-    }
-
-    for path in &args.paths {
-        println!("path: {}", path);
-    }
-
-    if args.dry_run {
-        println!("DRY RUN");
-    }
-
     if let Err(msg) = run(&args) {
         eprintln!("{}", msg);
         process::exit(1);
@@ -74,7 +65,7 @@ fn run(args: &Args) -> Result<()> {
     let args2 = args.clone();
 
     let printer = thread::spawn(move || {
-        print_results(rx, &args2);
+        let _ = print_results(rx, &args2);
     });
 
     walker.run(|| {
@@ -175,8 +166,9 @@ fn process(entry: &DirEntry, dry_run: bool) -> Result<bool> {
     Ok(true)
 }
 
-fn print_results(rx: Receiver<FileResult>, args: &Args) {
-    println!();
+fn print_results(rx: Receiver<FileResult>, args: &Args) -> Result<()> {
+    let mut printer = Printer::new();
+    printer.writeln()?;
 
     let mut file_count = 0;
     let mut updated_count = 0;
@@ -184,45 +176,47 @@ fn print_results(rx: Receiver<FileResult>, args: &Args) {
 
     while let Ok(result) = rx.recv() {
         match result {
-            FileResult::UpdatedFile(entry) => {
+            FileResult::UpdatedFile(_) => {
                 file_count += 1;
                 updated_count += 1;
-                println!("updated: {}", entry.path().display());
+                printer.write_file_result(&result, args.dry_run)?;
             }
-            FileResult::UpToDateFile(entry) => {
+            FileResult::UpToDateFile(_) => {
                 file_count += 1;
                 if args.list {
-                    println!("   read: {}", entry.path().display());
+                    printer.write_file_result(&result, args.dry_run)?;
                 }
             }
-            FileResult::FileError(entry, err) => {
+            FileResult::FileError(_, _) => {
                 file_count += 1;
                 error_count += 1;
-                eprintln!("  error: {}: {}", entry.path().display(), err);
+                printer.write_file_result(&result, args.dry_run)?;
             }
-            FileResult::UnknownError(err) => {
+            FileResult::UnknownError(_) => {
                 error_count += 1;
-                eprintln!("  error: {}", err);
+                printer.write_file_result(&result, args.dry_run)?;
             }
         };
     }
 
     if file_count != 0 {
-        println!();
+        printer.writeln()?;
     }
 
-    println!("total files: {}", file_count);
-    println!(
-        "{}: {}",
+    printer.write_stat("total files", format_args!("{}", file_count))?;
+
+    printer.write_stat(
         if args.dry_run {
             "files to be updated"
         } else {
             "updated files"
         },
-        updated_count
-    );
+        format_args!("{}", updated_count),
+    )?;
 
     if error_count != 0 {
-        println!("error count: {}", error_count);
+        printer.write_stat("error count", format_args!("{}", error_count))?;
     }
+
+    Ok(())
 }
