@@ -61,40 +61,38 @@ fn main() {
 fn run(args: &Args) -> Result<()> {
     let walker = build_walker(args)?;
 
-    let (tx, rx) = mpsc::channel::<FileResult>();
-    let args2 = args.clone();
+    thread::scope(|scope| {
+        let (tx, rx) = mpsc::channel::<FileResult>();
 
-    let printer = thread::spawn(move || {
-        let _ = print_results(rx, &args2);
-    });
+        scope.spawn(|| {
+            let _ = print_results(rx, args);
+        });
 
-    walker.run(|| {
-        let tx = tx.clone();
+        walker.run(|| {
+            let tx = tx.clone();
 
-        Box::new(move |entry| {
-            match entry {
-                Ok(entry) => {
-                    if entry.file_type().map_or(false, |ft| ft.is_file()) {
-                        let result = match process(&entry, args.dry_run) {
-                            Ok(true) => FileResult::UpdatedFile(entry),
-                            Ok(false) => FileResult::UpToDateFile(entry),
-                            Err(err) => FileResult::FileError(entry, err),
-                        };
+            Box::new(move |entry| {
+                match entry {
+                    Ok(entry) => {
+                        if entry.file_type().map_or(false, |ft| ft.is_file()) {
+                            let result = match process(&entry, args.dry_run) {
+                                Ok(true) => FileResult::UpdatedFile(entry),
+                                Ok(false) => FileResult::UpToDateFile(entry),
+                                Err(err) => FileResult::FileError(entry, err),
+                            };
 
-                        tx.send(result).unwrap();
+                            tx.send(result).unwrap();
+                        }
+                    }
+                    Err(msg) => {
+                        tx.send(FileResult::UnknownError(msg.into())).unwrap();
                     }
                 }
-                Err(msg) => {
-                    tx.send(FileResult::UnknownError(msg.into())).unwrap();
-                }
-            }
 
-            Continue
-        })
+                Continue
+            })
+        });
     });
-
-    drop(tx);
-    printer.join().unwrap();
 
     Ok(())
 }
